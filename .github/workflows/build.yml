@@ -1,0 +1,54 @@
+name: Build PS3 games
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Prebuilt PS3 toolchain: PSL1GHT + SDL2 (pinned so builds don't change by surprise)
+    container: hldtux/ps3dev-sdl2@sha256:2b6154588148336d559fbd37f4f52a3418fa96a86906b5019160baef22c75e55
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build every game folder
+        run: |
+          mkdir -p out
+          for game in */Makefile; do
+            dir=$(dirname "$game")
+            echo "=== Building $dir ==="
+            make -C "$dir" pkg
+            cp "$dir/$dir.pkg" out/
+          done
+          ls -la out
+
+      - name: Upload .pkg files
+        uses: actions/upload-artifact@v4
+        with:
+          name: ps3-pkgs
+          path: out/*.pkg
+
+  release:
+    # Puts the newest .pkg files on the repo's "Releases" page for easy download
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ps3-pkgs
+          path: out
+      - name: Publish "latest" release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes --cleanup-tag -R "$GITHUB_REPOSITORY" || true
+          gh release create latest out/*.pkg -R "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Latest PS3 games" \
+            --notes "Built from commit ${GITHUB_SHA::7}. Download a .pkg, copy it to the root of a FAT32 USB stick, then install it from Package Manager on PS3HEN."
