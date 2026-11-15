@@ -41,9 +41,6 @@
 uint32_t *screen;
 static uint32_t color;
 
-static void set_color(int r, int g, int b) {
-    color = ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
-}
 static void set_rgb(uint32_t c) { color = c; }
 
 static void fill_rect(int x, int y, int w, int h) {
@@ -232,8 +229,21 @@ static const char *frog_jump[] = {
 
 static const PalEntry frog_pal[2][6] = {
     { {'G', 0x5cc94a}, {'D', 0x1f4a2a}, {'L', 0xd8f0a0}, {'W', 0xffffff}, {'K', 0x101018}, {'R', 0xff8fa0} },
-    { {'G', 0x4aa8f0}, {'D', 0x1a2c5a}, {'L', 0xf0e6b0}, {'W', 0xffffff}, {'K', 0x101018}, {'R', 0xff8fa0} },
+    { {'G', 0xa070e0}, {'D', 0x3a1a5a}, {'L', 0xf0dcff}, {'W', 0xffffff}, {'K', 0x101018}, {'R', 0xff8fc0} },
 };
+
+/* Player 1 is Camilo (green), player 2 is Rina (violet, with a pink bow).
+ * They are in love. */
+static const char *frog_name[2] = { "CAMILO", "RINA" };
+static const uint32_t frog_color[2] = { 0x8ef07a, 0xd0a8ff };
+
+static const char *bow_img[] = {
+    "PP.PP",
+    "PPKPP",
+    "PP.PP",
+};
+static const PalEntry bow_pal[] = { {'P', 0xff5aa0}, {'K', 0xc02a70} };
+
 
 /* Beetle, facing right. R shell, H highlight, K dark */
 static const char *beetle_a[] = {
@@ -317,6 +327,11 @@ static const char *gem_img[] = {
 };
 static const PalEntry gem_pal[] = { {'K', 0x0e4a6a}, {'W', 0xffffff}, {'C', 0x4ae0f0}, {'B', 0x2a9ac8} };
 
+static void draw_frog(int who, const char **img, int x, int y, int scale, int flip) {
+    draw_sprite(img, 14, x, y, scale, flip, frog_pal[who], 6);
+    if (who == 1) draw_sprite(bow_img, 3, x + 5 * scale + scale / 2, y - 2 * scale, scale, 0, bow_pal, 2);
+}
+
 /* ============================================================ world */
 
 typedef struct {
@@ -360,6 +375,21 @@ static int n_enemies;
 static Mover movers[MAX_MOVERS];
 static int n_movers;
 static Particle parts[MAX_PARTICLES];
+#define MAX_LOVE 24
+typedef struct { float x, y, life, wob; } Love;
+static Love loves[MAX_LOVE];
+static float love_t;
+
+static void spawn_love(float x, float y) {
+    for (int i = 0; i < MAX_LOVE; i++) {
+        if (loves[i].life > 0) continue;
+        loves[i].x = x + (rand() % 30) - 15;
+        loves[i].y = y;
+        loves[i].life = 1.4f;
+        loves[i].wob = (rand() % 628) / 100.0f;
+        return;
+    }
+}
 static Player players[MAX_PLAYERS];
 static float start_x, start_y, check_x, check_y;
 static int check_col = -1;
@@ -455,6 +485,7 @@ static void load_level(int idx) {
     gems_level = gems_level_total = 0;
     check_col = -1;
     memset(parts, 0, sizeof(parts));
+    memset(loves, 0, sizeof(loves));
     memset(spring_anim, 0, sizeof(spring_anim));
     for (int y = 0; y < ROWS; y++) {
         for (int x = 0; x < map_w; x++) {
@@ -518,7 +549,7 @@ static void kill_player(Player *p) {
     if (!p->alive) return;
     p->alive = 0;
     p->riding = NULL;
-    spawn_particles(p->x + PW / 2, p->y + PH / 2, 14, p == &players[0] ? 0x5cc94a : 0x4aa8f0, 380);
+    spawn_particles(p->x + PW / 2, p->y + PH / 2, 14, p == &players[0] ? 0x5cc94a : 0xa070e0, 380);
     lives--;
     int others = 0;
     for (int i = 0; i < MAX_PLAYERS; i++)
@@ -582,6 +613,7 @@ static void collect_tiles(Player *p) {
                 state = ST_CLEAR;
                 state_t = 0;
                 spawn_particles(cx, cy - 30, 30, 0xffd84a, 500);
+                for (int k = 0; k < 8; k++) spawn_love(cx + 40 + (k - 4) * 14, cy - 40 - k * 10);
             } else if (c == '^') {
                 /* spikes only hurt in the lower part of the tile */
                 if (p->y + PH > ty * TILE + 20) hurt_player(p, cx);
@@ -842,6 +874,29 @@ static void update_particles(float dt) {
     }
     for (int x = 0; x < MAX_W; x++)
         if (spring_anim[x] > 0) spring_anim[x] -= dt;
+    for (int i = 0; i < MAX_LOVE; i++) {
+        if (loves[i].life <= 0) continue;
+        loves[i].life -= dt;
+        loves[i].y -= 70 * dt;
+        loves[i].wob += dt * 4;
+    }
+
+    /* when Camilo and Rina are close together, little hearts float up */
+    love_t -= dt;
+    if (love_t <= 0 && (state == ST_PLAY || state == ST_CLEAR)) {
+        love_t = 0.5f;
+        Player *a = &players[0], *b = &players[1];
+        if (a->active && a->alive && b->active && b->alive &&
+            fabsf(a->x - b->x) < 110 && fabsf(a->y - b->y) < 80)
+            spawn_love((a->x + b->x) / 2 + PW / 2, fminf(a->y, b->y) - 20);
+        /* playing alone: Rina waits for Camilo next to each golden lotus */
+        if (!b->active) {
+            for (int y = 0; y < ROWS; y++)
+                for (int x = 0; x < map_w; x++)
+                    if (map[y][x] == 'G' && fabsf(x * TILE - cam_x - SCREEN_W / 2) < SCREEN_W)
+                        spawn_love(x * TILE + 90, y * TILE - 30);
+        }
+    }
 }
 
 static void try_join_p2(const Input in[MAX_PLAYERS]) {
@@ -1188,11 +1243,29 @@ static void draw_world(void) {
         if (!p->on_ground) img = frog_jump;
         else if (fabsf(p->vx) > 20 && fmodf(p->anim, 0.24f) < 0.12f) img = frog_walk;
         int x = (int)(p->x - cam_x) - 8, y = (int)p->y - 2;
-        draw_sprite(img, 14, x, y, 3, p->face < 0, frog_pal[i], 6);
-        if (players[1].active) { /* little marker so you know who is who */
-            set_rgb(i == 0 ? 0x5cc94a : 0x4aa8f0);
-            draw_text_raw(i == 0 ? "1" : "2", x + 18, y - 26, 2);
-        }
+        draw_frog(i, img, x, y, 3, p->face < 0);
+        if (players[1].active) /* names so you know who is who */
+            draw_text(frog_name[i], x + 24 - text_width(frog_name[i], 2) / 2, y - 34, 2, frog_color[i]);
+    }
+
+    /* playing alone: Rina is waiting by the golden lotus */
+    if (!players[1].active) {
+        int tx0 = fdiv(cam_x) - 3, tx1 = fdiv(cam_x + SCREEN_W) + 1;
+        for (int ty = 0; ty < ROWS; ty++)
+            for (int tx = tx0; tx <= tx1; tx++)
+                if (tile_at(tx, ty) == 'G' && tx >= 0 && tx < map_w) {
+                    int x = tx * TILE + 64 - (int)cam_x, y = ty * TILE + TILE - 42 - 2;
+                    int hop = state == ST_CLEAR ? (int)fabsf(sinf(clock_t_ * 8) * 30) : 0;
+                    draw_frog(1, hop ? frog_jump : frog_stand, x, y - hop, 3, 1);
+                    draw_text(frog_name[1], x + 24 - text_width(frog_name[1], 2) / 2, y - hop - 34, 2, frog_color[1]);
+                }
+    }
+
+    for (int i = 0; i < MAX_LOVE; i++) {
+        Love *l = &loves[i];
+        if (l->life <= 0) continue;
+        int sc = l->life > 0.3f ? 3 : 2;
+        draw_sprite(heart_img, 7, (int)(l->x - cam_x + sinf(l->wob) * 8), (int)l->y, sc, 0, heart_pal, 2);
     }
 
     for (int i = 0; i < MAX_PARTICLES; i++) {
@@ -1210,25 +1283,25 @@ static void draw_hud(void) {
         Player *p = &players[i];
         if (!p->active) continue;
         int y = 20 + i * 44;
-        draw_text(i == 0 ? "J1" : "J2", 24, y + 4, 4, i == 0 ? 0x8ef07a : 0x8ac8ff);
+        draw_text(frog_name[i], 24, y + 6, 3, frog_color[i]);
         for (int h = 0; h < MAX_HEARTS; h++) {
             int filled = p->alive && h < p->hearts;
-            draw_sprite(heart_img, 7, 84 + h * 36, y, 4, 0, filled ? heart_pal : heart_empty_pal, 2);
+            draw_sprite(heart_img, 7, 144 + h * 36, y, 4, 0, filled ? heart_pal : heart_empty_pal, 2);
         }
     }
-    draw_sprite(gem_img, 7, 230, 22, 4, 0, gem_pal, 4);
+    draw_sprite(gem_img, 7, 290, 22, 4, 0, gem_pal, 4);
     snprintf(buf, sizeof(buf), "x%d", gems);
-    draw_text(buf, 270, 26, 4, 0xffffff);
+    draw_text(buf, 330, 26, 4, 0xffffff);
 
-    draw_sprite(frog_stand, 14, 380, 16, 2, 0, frog_pal[0], 6);
+    draw_frog(0, frog_stand, 440, 16, 2, 0);
     snprintf(buf, sizeof(buf), "x%d", lives);
-    draw_text(buf, 418, 26, 4, 0xffffff);
+    draw_text(buf, 478, 26, 4, 0xffffff);
 
     const char *name = level_defs[level_index].name;
     draw_text(name, SCREEN_W - 24 - text_width(name, 4), 26, 4, 0xfff0b0);
 
     if (!players[1].active && fmodf(clock_t_, 4.0f) < 2.5f)
-        draw_text("J2: PULSA X PARA UNIRTE", SCREEN_W - 24 - text_width("J2: PULSA X PARA UNIRTE", 3), 70, 3, 0xd0d8ff);
+        draw_text("RINA: PULSA X EN EL CONTROL 2", SCREEN_W - 24 - text_width("RINA: PULSA X EN EL CONTROL 2", 3), 70, 3, 0xd0a8ff);
 }
 
 static void draw_title(void) {
@@ -1248,18 +1321,20 @@ static void draw_title(void) {
     }
 
     int hop = (int)fabsf(sinf(clock_t_ * 3.0f) * 70);
-    draw_sprite(hop > 10 ? frog_jump : frog_stand, 14, 280, 12 * TILE - 70 - hop, 5, 0, frog_pal[0], 6);
-    if (players[1].active) {
-        int hop2 = (int)fabsf(sinf(clock_t_ * 3.0f + 1.2f) * 70);
-        draw_sprite(hop2 > 10 ? frog_jump : frog_stand, 14, 920, 12 * TILE - 70 - hop2, 5, 1, frog_pal[1], 6);
-    }
-    draw_sprite(gem_img, 7, 640 - 16, 470 + (int)(sinf(clock_t_ * 4) * 6), 4, 0, gem_pal, 4);
+    draw_frog(0, hop > 10 ? frog_jump : frog_stand, 380, 12 * TILE - 70 - hop, 5, 0);
+    draw_text(frog_name[0], 420 - text_width(frog_name[0], 4) / 2, 12 * TILE + 20, 4, frog_color[0]);
+    int hop2 = players[1].active ? (int)fabsf(sinf(clock_t_ * 3.0f + 1.2f) * 70) : 0;
+    draw_frog(1, hop2 > 10 ? frog_jump : frog_stand, 820, 12 * TILE - 70 - hop2, 5, 1);
+    draw_text(frog_name[1], 860 - text_width(frog_name[1], 4) / 2, 12 * TILE + 20, 4, frog_color[1]);
+    /* a beating heart between the two */
+    int beat = fmodf(clock_t_, 0.8f) < 0.15f ? 8 : 7;
+    draw_sprite(heart_img, 7, 640 - 7 * beat / 2, 500 - 7 * beat / 2, beat, 0, heart_pal, 2);
 
     draw_text_centered("RANO", 70, 26, 0x8ef07a);
     draw_text_centered("SALTARIN", 270, 10, 0xfff0b0);
     if (fmodf(clock_t_, 1.0f) < 0.65f) draw_text_centered("PULSA X PARA JUGAR", 380, 6, 0xffffff);
-    draw_text_centered(players[1].active ? "JUGADOR 2 LISTO!" : "JUGADOR 2: PULSA X EN EL SEGUNDO CONTROL",
-                       640, 3, players[1].active ? 0x8ac8ff : 0xe0e8ff);
+    draw_text_centered(players[1].active ? "RINA ESTA LISTA!" : "PARA JUGAR CON RINA: PULSA X EN EL SEGUNDO CONTROL",
+                       640, 3, players[1].active ? 0xd0a8ff : 0xe0e8ff);
     draw_text_centered("X SALTAR    CUADRADO CORRER    START PAUSA", 680, 3, 0xe0e8ff);
 }
 
@@ -1281,10 +1356,11 @@ void game_render(void) {
         theme = 2;
         draw_background(&themes[2]);
         draw_text_centered("HAS GANADO!", 140, 14, 0xffd84a);
-        draw_sprite(frog_jump, 14, 560, 300 + (int)(sinf(clock_t_ * 5) * 20), 5, 0, frog_pal[0], 6);
-        if (players[1].active)
-            draw_sprite(frog_jump, 14, 660, 300 + (int)(sinf(clock_t_ * 5 + 1) * 20), 5, 1, frog_pal[1], 6);
-        draw_text_centered("RANO ENCONTRO TODOS LOS LOTOS DORADOS", 450, 4, 0xffffff);
+        draw_frog(0, frog_jump, 470, 300 + (int)(sinf(clock_t_ * 5) * 20), 5, 0);
+        draw_frog(1, frog_jump, 730, 300 + (int)(sinf(clock_t_ * 5 + 1) * 20), 5, 1);
+        int beat = fmodf(clock_t_, 0.8f) < 0.15f ? 9 : 8;
+        draw_sprite(heart_img, 7, 640 - 7 * beat / 2, 330 - 7 * beat / 2, beat, 0, heart_pal, 2);
+        draw_text_centered("CAMILO Y RINA, JUNTOS PARA SIEMPRE", 450, 4, 0xffffff);
         snprintf(buf, sizeof(buf), "GEMAS: %d    VIDAS: %d", gems, lives);
         draw_text_centered(buf, 520, 5, 0x9af4ff);
         if (state_t > 1.5f && fmodf(clock_t_, 1.0f) < 0.65f) draw_text_centered("PULSA X", 620, 5, 0xffffff);
