@@ -1,6 +1,6 @@
 /*
  * PS3 Pong - a tiny first homebrew game.
- * PSL1GHT + SDL2, drawn at 1280x720.
+ * PSL1GHT, drawn at 1280x720 straight to the RSX framebuffer.
  *
  * Controls (controller 1 = left paddle):
  *   Left stick / D-pad up-down : move paddle
@@ -9,12 +9,18 @@
  *   Controller 2 (optional)    : press X to take over the right paddle
  *   PS button -> Quit Game     : exit to XMB
  */
-#define SDL_MAIN_HANDLED
-#include <SDL.h>
 #include <io/pad.h>
+#include <lv2/systime.h>
+#include <malloc.h>
 #include <math.h>
+#include <ppu-types.h>
+#include <rsx/rsx.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sysutil/sysutil.h>
+#include <sysutil/video.h>
+#include <unistd.h>
 
 #define SCREEN_W 1280
 #define SCREEN_H 720
@@ -28,6 +34,89 @@
 #define BALL_START_SPEED 520.0f
 #define BALL_MAX_SPEED 1300.0f
 #define WIN_SCORE 7
+
+/* ------------------------------------------------------------- graphics */
+/* We draw straight into two framebuffers in RSX memory and flip between
+ * them on vsync. All game coordinates are 1280x720; if the TV is not
+ * running at 720p they are scaled to the real resolution. */
+
+static gcmContextData *context;
+static u32 *fb[2];
+static u32 fb_pitch, fb_w, fb_h;
+static int fb_cur = 0;
+static u32 draw_color = 0;
+
+static int gfx_init(void) {
+    void *host = memalign(1024 * 1024, 32 * 1024 * 1024);
+    if (!host) return -1;
+    if (rsxInit(&context, 0x100000, 32 * 1024 * 1024, host) != 0) return -1;
+
+    videoState state;
+    if (videoGetState(VIDEO_PRIMARY, 0, &state) != 0 || state.state != 0) return -1;
+    u8 res_id = state.displayMode.resolution;
+    if (videoGetResolutionAvailability(VIDEO_PRIMARY, VIDEO_RESOLUTION_720, VIDEO_ASPECT_AUTO, 0) == 1)
+        res_id = VIDEO_RESOLUTION_720;
+
+    videoResolution res;
+    if (videoGetResolution(res_id, &res) != 0) return -1;
+    fb_w = res.width;
+    fb_h = res.height;
+    fb_pitch = fb_w * 4;
+
+    videoConfiguration vcfg;
+    memset(&vcfg, 0, sizeof(vcfg));
+    vcfg.resolution = res_id;
+    vcfg.format = VIDEO_BUFFER_FORMAT_XRGB;
+    vcfg.pitch = fb_pitch;
+    vcfg.aspect = VIDEO_ASPECT_AUTO;
+    rsxFinish(context, 1);
+    if (videoConfigure(VIDEO_PRIMARY, &vcfg, NULL, 0) != 0) return -1;
+
+    gcmSetFlipMode(GCM_FLIP_VSYNC);
+    for (int i = 0; i < 2; i++) {
+        u32 offset;
+        fb[i] = (u32 *)rsxMemalign(64, fb_pitch * fb_h);
+        if (!fb[i]) return -1;
+        memset(fb[i], 0, fb_pitch * fb_h);
+        if (rsxAddressToOffset(fb[i], &offset) != 0) return -1;
+        if (gcmSetDisplayBuffer(i, offset, fb_pitch, fb_w, fb_h) != 0) return -1;
+    }
+    gcmResetFlipStatus();
+    return 0;
+}
+
+static void gfx_flip(void) {
+    gcmSetFlip(context, fb_cur);
+    rsxFlushBuffer(context);
+    gcmSetWaitFlip(context);
+    while (gcmGetFlipStatus() != 0) usleep(200);
+    gcmResetFlipStatus();
+    fb_cur ^= 1;
+}
+
+static void set_color(int r, int g, int b) {
+    draw_color = ((u32)r << 16) | ((u32)g << 8) | (u32)b;
+}
+
+/* Fill a rectangle given in 1280x720 game coordinates */
+static void fill_rect(int x, int y, int w, int h) {
+    int x0 = x * (int)fb_w / SCREEN_W, x1 = (x + w) * (int)fb_w / SCREEN_W;
+    int y0 = y * (int)fb_h / SCREEN_H, y1 = (y + h) * (int)fb_h / SCREEN_H;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > (int)fb_w) x1 = fb_w;
+    if (y1 > (int)fb_h) y1 = fb_h;
+    if (x0 >= x1 || y0 >= y1) return;
+    u32 *buf = fb[fb_cur];
+    for (int yy = y0; yy < y1; yy++) {
+        u32 *row = buf + yy * fb_w;
+        for (int xx = x0; xx < x1; xx++) row[xx] = draw_color;
+    }
+}
+
+static void clear_screen(void) {
+    fill_rect(0, 0, SCREEN_W, SCREEN_H);
+}
 
 /* ---------------------------------------------------------------- input */
 
@@ -117,20 +206,19 @@ static int text_width(const char *s, int scale) {
     return n > 0 ? n * 4 * scale - scale : 0;
 }
 
-static void draw_text(SDL_Renderer *r, const char *s, int x, int y, int scale) {
+static void draw_text(const char *s, int x, int y, int scale) {
     for (; *s; s++, x += 4 * scale) {
         const char *g = glyph(*s);
         for (int i = 0; i < 15; i++) {
             if (g[i] == '1') {
-                SDL_Rect px = { x + (i % 3) * scale, y + (i / 3) * scale, scale, scale };
-                SDL_RenderFillRect(r, &px);
+                fill_rect(x + (i % 3) * scale, y + (i / 3) * scale, scale, scale);
             }
         }
     }
 }
 
-static void draw_text_centered(SDL_Renderer *r, const char *s, int y, int scale) {
-    draw_text(r, s, (SCREEN_W - text_width(s, scale)) / 2, y, scale);
+static void draw_text_centered(const char *s, int y, int scale) {
+    draw_text(s, (SCREEN_W - text_width(s, scale)) / 2, y, scale);
 }
 
 /* ----------------------------------------------------------------- game */
@@ -265,101 +353,91 @@ static void update(float dt) {
     }
 }
 
-static void render(SDL_Renderer *r) {
-    SDL_SetRenderDrawColor(r, 10, 12, 30, 255);
-    SDL_RenderClear(r);
+static void render(void) {
+    set_color(10, 12, 30);
+    clear_screen();
 
     if (state == STATE_TITLE) {
-        SDL_SetRenderDrawColor(r, 255, 255, 255, 255);
-        draw_text_centered(r, "PONG", 180, 30);
+        set_color(255, 255, 255);
+        draw_text_centered("PONG", 180, 30);
         if (fmodf(blink, 1.0f) < 0.65f)
-            draw_text_centered(r, "PRESS X TO START", 480, 8);
-        SDL_SetRenderDrawColor(r, 120, 130, 170, 255);
-        draw_text_centered(r, "2ND CONTROLLER - PRESS X TO PLAY", 600, 4);
+            draw_text_centered("PRESS X TO START", 480, 8);
+        set_color(120, 130, 170);
+        draw_text_centered("2ND CONTROLLER - PRESS X TO PLAY", 600, 4);
         return;
     }
 
     /* center dashed line */
-    SDL_SetRenderDrawColor(r, 70, 80, 120, 255);
+    set_color(70, 80, 120);
     for (int y = 10; y < SCREEN_H; y += 40) {
-        SDL_Rect dash = { SCREEN_W / 2 - 3, y, 6, 22 };
-        SDL_RenderFillRect(r, &dash);
+        fill_rect(SCREEN_W / 2 - 3, y, 6, 22);
     }
 
     /* scores */
     char buf[8];
-    SDL_SetRenderDrawColor(r, 200, 210, 255, 255);
-    SDL_snprintf(buf, sizeof(buf), "%d", left.score);
-    draw_text(r, buf, SCREEN_W / 2 - 80 - text_width(buf, 14), 40, 14);
-    SDL_snprintf(buf, sizeof(buf), "%d", right.score);
-    draw_text(r, buf, SCREEN_W / 2 + 80, 40, 14);
+    set_color(200, 210, 255);
+    snprintf(buf, sizeof(buf), "%d", left.score);
+    draw_text(buf, SCREEN_W / 2 - 80 - text_width(buf, 14), 40, 14);
+    snprintf(buf, sizeof(buf), "%d", right.score);
+    draw_text(buf, SCREEN_W / 2 + 80, 40, 14);
 
     /* paddles */
-    SDL_SetRenderDrawColor(r, 80, 200, 255, 255);
-    SDL_Rect lp = { PADDLE_MARGIN, (int)left.y, PADDLE_W, PADDLE_H };
-    SDL_RenderFillRect(r, &lp);
-    SDL_SetRenderDrawColor(r, 255, 110, 140, 255);
-    SDL_Rect rp = { SCREEN_W - PADDLE_MARGIN - PADDLE_W, (int)right.y, PADDLE_W, PADDLE_H };
-    SDL_RenderFillRect(r, &rp);
+    set_color(80, 200, 255);
+    fill_rect(PADDLE_MARGIN, (int)left.y, PADDLE_W, PADDLE_H);
+    set_color(255, 110, 140);
+    fill_rect(SCREEN_W - PADDLE_MARGIN - PADDLE_W, (int)right.y, PADDLE_W, PADDLE_H);
 
     /* ball */
-    SDL_SetRenderDrawColor(r, 255, 240, 120, 255);
-    SDL_Rect b = { (int)ball_x, (int)ball_y, BALL_SIZE, BALL_SIZE };
-    SDL_RenderFillRect(r, &b);
+    set_color(255, 240, 120);
+    fill_rect((int)ball_x, (int)ball_y, BALL_SIZE, BALL_SIZE);
 
-    SDL_SetRenderDrawColor(r, 255, 255, 255, 255);
+    set_color(255, 255, 255);
     if (state == STATE_SERVE && fmodf(blink, 1.0f) < 0.65f)
-        draw_text_centered(r, "PRESS X TO SERVE", 560, 6);
+        draw_text_centered("PRESS X TO SERVE", 560, 6);
     if (state == STATE_PAUSE)
-        draw_text_centered(r, "PAUSED", 300, 14);
+        draw_text_centered("PAUSED", 300, 14);
     if (state == STATE_OVER) {
-        draw_text_centered(r, left.score > right.score ? "YOU WIN!" : (right.human ? "P2 WINS!" : "CPU WINS!"), 260, 14);
+        draw_text_centered(left.score > right.score ? "YOU WIN!" : (right.human ? "P2 WINS!" : "CPU WINS!"), 260, 14);
         if (fmodf(blink, 1.0f) < 0.65f)
-            draw_text_centered(r, "PRESS X TO PLAY AGAIN", 460, 6);
+            draw_text_centered("PRESS X TO PLAY AGAIN", 460, 6);
     }
+}
+
+static volatile int running = 1;
+
+static void sysutil_cb(u64 status, u64 param, void *usrdata) {
+    (void)param; (void)usrdata;
+    if (status == SYSUTIL_EXIT_GAME) running = 0; /* PS button -> Quit Game */
 }
 
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
-    SDL_SetMainReady();
 
-    if (SDL_Init(SDL_INIT_VIDEO) != 0) return 1;
+    if (gfx_init() != 0) return 1;
     ioPadInit(7);
+    sysUtilRegisterCallback(SYSUTIL_EVENT_SLOT0, sysutil_cb, NULL);
 
-    SDL_Window *win = SDL_CreateWindow("Pong", 0, 0, SCREEN_W, SCREEN_H, SDL_WINDOW_FULLSCREEN);
-    if (!win) { SDL_Quit(); return 1; }
-    SDL_Renderer *ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-    if (!ren) ren = SDL_CreateRenderer(win, -1, 0);
-    if (!ren) { SDL_DestroyWindow(win); SDL_Quit(); return 1; }
-    /* Draw in 1280x720 coordinates whatever the TV is set to */
-    SDL_RenderSetLogicalSize(ren, SCREEN_W, SCREEN_H);
-
-    srand(SDL_GetTicks());
+    srand((unsigned)sysGetSystemTime());
     reset_ball();
     left.y = right.y = (SCREEN_H - PADDLE_H) / 2.0f;
 
-    int running = 1;
-    Uint32 last = SDL_GetTicks();
+    s64 last = sysGetSystemTime();
     while (running) {
-        SDL_Event e;
-        while (SDL_PollEvent(&e)) {
-            if (e.type == SDL_QUIT) running = 0; /* PS button -> Quit Game */
-        }
+        sysUtilCheckCallback();
 
-        Uint32 now = SDL_GetTicks();
-        float dt = (now - last) / 1000.0f;
+        s64 now = sysGetSystemTime();
+        float dt = (now - last) / 1000000.0f;
         last = now;
         if (dt > 0.05f) dt = 0.05f;
 
         read_pads();
         update(dt);
-        render(ren);
-        SDL_RenderPresent(ren);
+        render();
+        gfx_flip();
     }
 
     ioPadEnd();
-    SDL_DestroyRenderer(ren);
-    SDL_DestroyWindow(win);
-    SDL_Quit();
+    sysUtilUnregisterCallback(SYSUTIL_EVENT_SLOT0);
+    rsxFinish(context, 1);
     return 0;
 }

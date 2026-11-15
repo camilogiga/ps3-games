@@ -1,5 +1,5 @@
 #---------------------------------------------------------------------------------
-# PS3 Pong - PSL1GHT + SDL2
+# PS3 Pong - PSL1GHT
 #---------------------------------------------------------------------------------
 .SUFFIXES:
 ifeq ($(strip $(PSL1GHT)),)
@@ -23,7 +23,7 @@ CFLAGS		=	-O2 -Wall -mcpu=cell $(MACHDEP) $(INCLUDE)
 CXXFLAGS	=	$(CFLAGS)
 LDFLAGS		=	$(MACHDEP) -Wl,-Map,$(notdir $@).map
 
-LIBS		:=	-lSDL2 -lm -lgcm_sys -lrsx -lsysutil -lio -laudio -lrt -llv2
+LIBS		:=	-lrsx -lgcm_sys -lio -lsysutil -lrt -llv2 -lm
 
 ifneq ($(BUILD),$(notdir $(CURDIR)))
 

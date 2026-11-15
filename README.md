@@ -1,6 +1,6 @@
 # PS3 games
 
-Simple 2D homebrew games for PS3 (PS3HEN on HFW 4.93), written in C with PSL1GHT + SDL2.
+Simple 2D homebrew games for PS3 (PS3HEN on HFW 4.93), written in C with PSL1GHT.
 
 Every push to `main` builds all games on GitHub Actions. The newest `.pkg` files are on the **Releases** page (release called "Latest PS3 games").
 
