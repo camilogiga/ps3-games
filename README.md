@@ -14,3 +14,8 @@ Every push to `main` builds all games on GitHub Actions. The newest `.pkg` files
 
 ## Adding a game
 Make a new folder (copy `pong/` as a template). Each folder with a `Makefile` is built automatically; the `.pkg` is named after the folder. Give each game a unique 9-character `APPID`.
+
+## Notes for future games
+- Don't use the SDL2 renderer (`SDL_CreateRenderer`) from the PSL1GHT SDL2 port: it corrupts rectangle coordinates and only applies the last draw color. Draw straight to the RSX framebuffer like `pong/source/main.c` does (`gfx_init`, `fill_rect`, `gfx_flip`).
+- Read the controller with PSL1GHT's `ioPad*` directly. `ioPadGetData` returns `len == 0` when nothing changed, so keep the previous state.
+- Tested working on a CECH-4211C Super Slim with HFW 4.93.1 + PS3HEN.
