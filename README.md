@@ -12,7 +12,7 @@ Every push to `main` builds all games on GitHub Actions. The newest `.pkg` files
 ## Games
 - **pong/** — Pong. Left stick or D-pad moves, X serves, START pauses. A second controller can press X to take the right paddle.
 
-- **rano/** — Rano Saltarin, an original platformer about a little frog. 3 levels (La Charca, La Cueva, Las Nubes), gems, beetles, wasps, springs, moving ledges and lantern checkpoints. Left stick or D-pad moves, X jumps (hold for higher), Square runs, START pauses. Two players can play together: controller 2 presses X to join, lives are shared. Levels are made in `rano/tools/make_levels.py`, which writes `rano/source/levels.h`.
+- **rano/** — Rano Saltarin, an original platformer about two frogs in love: Camilo (green, player 1) and Rina (violet with a pink bow, player 2). 3 levels (La Charca, La Cueva, Las Nubes), gems, beetles, wasps, springs, moving ledges and lantern checkpoints. Left stick or D-pad moves, X jumps (hold for higher), Square runs, START pauses. Two players can play together: controller 2 presses X to join as Rina, lives are shared, and hearts float up when the two are close. Playing alone, Rina waits for Camilo by each golden lotus. Levels are made in `rano/tools/make_levels.py`, which writes `rano/source/levels.h`.
 
 ## Adding a game
 Make a new folder (copy `pong/` as a template). Each folder with a `Makefile` is built automatically; the `.pkg` is named after the folder. Give each game a unique 9-character `APPID`.
